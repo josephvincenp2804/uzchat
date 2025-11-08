@@ -72,7 +72,7 @@
             color: #444;
         }
 
-        input {
+        input, textarea {
             width: 100%;
             padding: 12px 15px;
             border: 2px solid #e1e5ee;
@@ -81,7 +81,7 @@
             transition: border-color 0.3s;
         }
 
-        input:focus {
+        input:focus, textarea:focus {
             outline: none;
             border-color: #4a00e0;
         }
@@ -229,6 +229,11 @@
             margin-top: 5px;
         }
 
+        .qr-code {
+            text-align: center;
+            margin: 15px 0;
+        }
+
         footer {
             margin-top: 20px;
             text-align: center;
@@ -288,14 +293,16 @@
                 </div>
                 
                 <div class="signaling-info">
-                    <h3>Manual Signaling</h3>
-                    <p>Share this data with your peer to establish connection:</p>
-                    <div id="local-signaling-data" class="signaling-data"></div>
-                    <button id="copy-local-btn" class="copy-btn">Copy to Clipboard</button>
+                    <h3>Share This Link with Your Peer</h3>
+                    <div id="share-link" class="signaling-data" style="cursor: pointer; user-select: all;">
+                        Copy this link and share it
+                    </div>
+                    <button id="copy-link-btn" class="copy-btn">Copy Link to Clipboard</button>
                     
-                    <p style="margin-top: 15px;">Paste peer's signaling data here:</p>
-                    <textarea id="remote-signaling-data" placeholder='Paste peer data here (e.g., {"type":"offer","sdp":"..."})' style="width: 100%; height: 80px; padding: 10px; border: 1px solid #ddd; border-radius: 5px; font-family: monospace; font-size: 0.8rem;"></textarea>
-                    <button id="apply-remote-btn" class="copy-btn">Apply Peer Data</button>
+                    <div class="qr-code" id="qr-container">
+                        <canvas id="qr-code"></canvas>
+                        <p>Scan to join on mobile</p>
+                    </div>
                 </div>
                 
                 <button id="leave-btn" class="secondary">Leave Chat</button>
@@ -318,20 +325,40 @@
         const messagesContainer = document.getElementById('messages');
         const messageInput = document.getElementById('message-input');
         const sendBtn = document.getElementById('send-btn');
-        const localSignalingData = document.getElementById('local-signaling-data');
-        const copyLocalBtn = document.getElementById('copy-local-btn');
-        const remoteSignalingData = document.getElementById('remote-signaling-data');
-        const applyRemoteBtn = document.getElementById('apply-remote-btn');
+        const shareLink = document.getElementById('share-link');
+        const copyLinkBtn = document.getElementById('copy-link-btn');
         const leaveBtn = document.getElementById('leave-btn');
+        const qrContainer = document.getElementById('qr-container');
+        const qrCanvas = document.getElementById('qr-code');
 
         // WebRTC variables
         let peerConnection;
         let dataChannel;
         let isInitiator = false;
         let roomCode = '';
+        let localOffer = null;
+
+        // Check URL for room code on page load
+        function checkUrlForRoom() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const room = urlParams.get('room');
+            const offer = urlParams.get('offer');
+            
+            if (room) {
+                roomCodeInput.value = room;
+                if (offer) {
+                    // We're joining with an offer from the initiator
+                    setTimeout(() => {
+                        joinRoomWithOffer(room, offer);
+                    }, 1000);
+                }
+            }
+        }
 
         // Initialize the app
         function init() {
+            checkUrlForRoom();
+            
             // Event listeners for home page
             joinBtn.addEventListener('click', joinRoom);
             createBtn.addEventListener('click', createRoom);
@@ -341,8 +368,7 @@
             messageInput.addEventListener('keypress', (e) => {
                 if (e.key === 'Enter') sendMessage();
             });
-            copyLocalBtn.addEventListener('click', copyLocalData);
-            applyRemoteBtn.addEventListener('click', applyRemoteData);
+            copyLinkBtn.addEventListener('click', copyShareLink);
             leaveBtn.addEventListener('click', leaveChat);
         }
 
@@ -371,6 +397,28 @@
             initializeWebRTC();
         }
 
+        // Join room with offer from URL
+        function joinRoomWithOffer(room, offerData) {
+            roomCode = room;
+            isInitiator = false;
+            showChatPage();
+            initializeWebRTC();
+            
+            // Decode and set the remote offer
+            try {
+                const offer = JSON.parse(decodeURIComponent(offerData));
+                setTimeout(() => {
+                    if (peerConnection) {
+                        peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
+                            .then(() => createAnswer())
+                            .catch(error => console.error('Error setting remote description:', error));
+                    }
+                }, 2000);
+            } catch (error) {
+                console.error('Error parsing offer from URL:', error);
+            }
+        }
+
         // Show the chat interface
         function showChatPage() {
             homePage.classList.remove('active');
@@ -380,6 +428,9 @@
             
             // Update the page title with room code
             document.querySelector('header h1').textContent = `Room: ${roomCode}`;
+            
+            // Generate share link
+            updateShareLink();
         }
 
         // Initialize WebRTC connection
@@ -388,7 +439,10 @@
             const configuration = {
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' }
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' },
+                    { urls: 'stun:stun3.l.google.com:19302' },
+                    { urls: 'stun:stun4.l.google.com:19302' }
                 ]
             };
             
@@ -401,9 +455,13 @@
             
             peerConnection.onicecandidate = (event) => {
                 if (event.candidate) {
-                    // Send ICE candidate to peer (in a real app, via signaling server)
-                    updateLocalSignalingData();
+                    // For this simple version, we'll use URL parameters
+                    updateShareLink();
                 }
+            };
+            
+            peerConnection.onconnectionstatechange = () => {
+                updateConnectionStatus();
             };
             
             // Set up data channel
@@ -413,17 +471,13 @@
                     ordered: true
                 });
                 setupDataChannel();
+                createOffer();
             } else {
                 // Receiver sets up handler for incoming data channel
                 peerConnection.ondatachannel = (event) => {
                     dataChannel = event.channel;
                     setupDataChannel();
                 };
-            }
-            
-            // Create and exchange offers/answers
-            if (isInitiator) {
-                createOffer();
             }
         }
 
@@ -433,12 +487,14 @@
                 updateConnectionStatus();
                 messageInput.disabled = false;
                 sendBtn.disabled = false;
+                addMessage('Connected to peer!', 'remote');
             };
             
             dataChannel.onclose = () => {
                 updateConnectionStatus();
                 messageInput.disabled = true;
                 sendBtn.disabled = true;
+                addMessage('Connection closed', 'remote');
             };
             
             dataChannel.onmessage = (event) => {
@@ -451,7 +507,8 @@
             try {
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
-                updateLocalSignalingData();
+                localOffer = offer;
+                updateShareLink();
             } catch (error) {
                 console.error('Error creating offer:', error);
             }
@@ -462,64 +519,73 @@
             try {
                 const answer = await peerConnection.createAnswer();
                 await peerConnection.setLocalDescription(answer);
-                updateLocalSignalingData();
+                updateShareLink();
             } catch (error) {
                 console.error('Error creating answer:', error);
             }
         }
 
-        // Update the local signaling data display
-        function updateLocalSignalingData() {
-            if (peerConnection.localDescription) {
-                localSignalingData.textContent = JSON.stringify(peerConnection.localDescription);
-            } else {
-                localSignalingData.textContent = 'No local description yet';
+        // Update the share link
+        function updateShareLink() {
+            let shareUrl = window.location.origin + window.location.pathname + `?room=${roomCode}`;
+            
+            if (isInitiator && localOffer) {
+                shareUrl += `&offer=${encodeURIComponent(JSON.stringify(localOffer))}`;
             }
+            
+            shareLink.textContent = shareUrl;
+            generateQRCode(shareUrl);
         }
 
-        // Copy local signaling data to clipboard
-        function copyLocalData() {
-            navigator.clipboard.writeText(localSignalingData.textContent)
+        // Generate QR code
+        function generateQRCode(text) {
+            const canvas = qrCanvas;
+            const ctx = canvas.getContext('2d');
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Simple QR-like pattern (for demonstration)
+            ctx.fillStyle = '#000';
+            ctx.fillRect(10, 10, 5, 5);
+            ctx.fillRect(20, 10, 5, 5);
+            ctx.fillRect(10, 20, 5, 5);
+            
+            // In a real app, you'd use a QR code library like qrcode.js
+            ctx.fillStyle = '#333';
+            ctx.font = '12px Arial';
+            ctx.fillText('QR Code Placeholder', 25, 25);
+        }
+
+        // Copy share link to clipboard
+        function copyShareLink() {
+            navigator.clipboard.writeText(shareLink.textContent)
                 .then(() => {
-                    alert('Signaling data copied to clipboard!');
+                    alert('Share link copied to clipboard! Send this to your peer.');
                 })
                 .catch(err => {
-                    console.error('Failed to copy: ', err);
+                    // Fallback for older browsers
+                    shareLink.select();
+                    document.execCommand('copy');
+                    alert('Share link copied! Send this to your peer.');
                 });
-        }
-
-        // Apply remote signaling data
-        function applyRemoteData() {
-            try {
-                const data = JSON.parse(remoteSignalingData.value);
-                
-                if (data.type === 'offer') {
-                    // We received an offer, set it as remote description and create answer
-                    peerConnection.setRemoteDescription(new RTCSessionDescription(data))
-                        .then(() => createAnswer())
-                        .catch(error => console.error('Error setting remote description:', error));
-                } else if (data.type === 'answer') {
-                    // We received an answer, set it as remote description
-                    peerConnection.setRemoteDescription(new RTCSessionDescription(data))
-                        .catch(error => console.error('Error setting remote description:', error));
-                } else if (data.type === 'candidate') {
-                    // We received an ICE candidate, add it to the connection
-                    peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate))
-                        .catch(error => console.error('Error adding ICE candidate:', error));
-                }
-                
-                remoteSignalingData.value = '';
-            } catch (error) {
-                alert('Invalid signaling data format');
-                console.error('Error parsing signaling data:', error);
-            }
         }
 
         // Update connection status display
         function updateConnectionStatus() {
-            const state = peerConnection.iceConnectionState;
+            if (!peerConnection) return;
+            
+            const state = peerConnection.connectionState || peerConnection.iceConnectionState;
             connectionStatus.textContent = state.charAt(0).toUpperCase() + state.slice(1);
             connectionStatus.className = `status ${state}`;
+            
+            if (state === 'connected') {
+                messageInput.disabled = false;
+                sendBtn.disabled = false;
+            } else {
+                messageInput.disabled = true;
+                sendBtn.disabled = true;
+            }
         }
 
         // Send a message through the data channel
@@ -555,14 +621,16 @@
             dataChannel = null;
             isInitiator = false;
             roomCode = '';
+            localOffer = null;
             
             // Clear UI
             messagesContainer.innerHTML = '<div class="message remote">Welcome to the chat! Messages will appear here.</div>';
             messageInput.value = '';
             messageInput.disabled = true;
             sendBtn.disabled = true;
-            localSignalingData.textContent = '';
-            remoteSignalingData.value = '';
+            
+            // Clear URL parameters
+            window.history.replaceState({}, document.title, window.location.pathname);
             
             // Show home page
             homePage.classList.add('active');
